@@ -4,7 +4,9 @@
 // arquivos. Por isso os dados ficam num banco Postgres externo (Neon).
 // ============================================================
 const express = require('express');
-const { Pool } = require('pg');             // conversa com o banco Postgres
+// Driver da Neon feito para a Vercel: conversa com o Postgres pela porta 443 (WebSocket)
+const { Pool, neonConfig } = require('@neondatabase/serverless');
+neonConfig.webSocketConstructor = require('ws');
 const bcrypt = require('bcryptjs');          // embaralha senhas (hash)
 const jwt = require('jsonwebtoken');         // "crachá" de login
 const cookieParser = require('cookie-parser');
@@ -13,10 +15,12 @@ const crypto = require('crypto');
 
 // ---------- 1. BANCO DE DADOS ----------
 // O Vercel cria a variável DATABASE_URL sozinho ao conectar o banco ao projeto.
-const dbUrl = (process.env.DATABASE_URL || process.env.POSTGRES_URL || '')
-  .replace('sslmode=require', 'sslmode=verify-full').replace(/[&?]channel_binding=[^&]*/, '');
+// Endereço do banco (a Vercel cria DATABASE_URL ao conectar a Neon). Tiramos parâmetros extras.
+let dbUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL || '';
+try { const u = new URL(dbUrl); u.searchParams.set('sslmode', 'require'); u.searchParams.delete('channel_binding'); dbUrl = u.toString(); } catch {}
 // connectionTimeoutMillis = espera até 15s (o banco gratuito "acorda" devagar depois de parado)
 const pool = new Pool({ connectionString: dbUrl, max: 3, connectionTimeoutMillis: 15000 });
+pool.on('error', e => console.error('Erro no pool:', e.message));
 const q = async (sql, p = []) => (await pool.query(sql, p)).rows;   // devolve a lista de linhas
 const one = async (sql, p) => (await q(sql, p))[0];                 // devolve só a primeira linha
 // tx = transação: executa vários comandos como um só (ou todos funcionam, ou nenhum)
@@ -90,6 +94,13 @@ app.set('trust proxy', 1);
 app.use(express.json(), cookieParser());
 // Entrega a tela do site. Procura a pasta "public" em vários lugares (o Vercel muda o caminho).
 for (const d of [path.join(__dirname, 'public'), path.join(__dirname, '..', 'public'), path.join(process.cwd(), 'public')]) app.use(express.static(d));
+// Página de diagnóstico: abra /api/diag para ver se o banco conecta (mostra só o servidor e o erro)
+app.get('/api/diag', async (req, res) => {
+  let host = 'DATABASE_URL não encontrada';
+  try { host = new URL(dbUrl).host; } catch {}
+  try { await pool.query('SELECT 1'); res.json({ ok: true, host }); }
+  catch (e) { res.json({ ok: false, host, erro: e.message, codigo: e.code || null }); }
+});
 app.use((req, res, next) => start().then(() => next(), () => res.status(500).json({ erro: 'Banco de dados indisponível' })));
 
 app.post('/api/login', wrap(async (req, res) => {
